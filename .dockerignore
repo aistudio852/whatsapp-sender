@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.gitignore
+*.md
+.wwebjs_auth
+.wwebjs_cache
+.env.local
+.env*.local
