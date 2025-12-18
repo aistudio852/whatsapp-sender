@@ -1,5 +1,7 @@
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'qr_ready' | 'authenticated' | 'ready';
 
@@ -151,15 +153,16 @@ export async function initializeClient(): Promise<void> {
 }
 
 export async function logout(): Promise<void> {
-  if (state.client) {
-    const client = state.client;
-    // 先重置狀態，讓 API 可以快速返回
-    state.client = null;
-    state.qrCode = null;
-    state.qrDataUrl = null;
-    state.error = null;
-    notifyStatusChange('disconnected');
+  const client = state.client;
 
+  // 先重置狀態，讓 API 可以快速返回
+  state.client = null;
+  state.qrCode = null;
+  state.qrDataUrl = null;
+  state.error = null;
+  notifyStatusChange('disconnected');
+
+  if (client) {
     // 背景執行登出和清理，設置 timeout 避免 hang
     try {
       await withTimeout(client.logout(), 10000, 'Logout timeout');
@@ -171,6 +174,17 @@ export async function logout(): Promise<void> {
     } catch (e) {
       console.log('Error during destroy:', e);
     }
+  }
+
+  // 刪除 session 數據確保完全登出
+  const authPath = path.join(process.cwd(), '.wwebjs_auth');
+  try {
+    if (fs.existsSync(authPath)) {
+      fs.rmSync(authPath, { recursive: true, force: true });
+      console.log('Auth data cleared');
+    }
+  } catch (e) {
+    console.log('Error clearing auth data:', e);
   }
 }
 
