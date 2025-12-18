@@ -34,6 +34,43 @@ export function detectPhoneColumn(headers: string[]): string | null {
   return null;
 }
 
+export function parseCSVString(csvContent: string): ParsedCSVData {
+  const results = Papa.parse(csvContent, {
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: (header: string) => header.trim(),
+  });
+
+  const headers = results.meta.fields || [];
+  const rows = results.data as Record<string, string>[];
+  const errors: string[] = [];
+
+  if (results.errors.length > 0) {
+    results.errors.forEach((error) => {
+      errors.push(`第 ${error.row} 行: ${error.message}`);
+    });
+  }
+
+  const phoneColumn = detectPhoneColumn(headers);
+
+  const cleanedRows = rows.map((row) => {
+    const cleanedRow: Record<string, string> = {};
+    for (const key in row) {
+      cleanedRow[key] = typeof row[key] === 'string' ? row[key].trim() : String(row[key] || '');
+    }
+    return cleanedRow;
+  }).filter(row => {
+    return Object.values(row).some(value => value !== '');
+  });
+
+  return {
+    headers,
+    rows: cleanedRows,
+    phoneColumn,
+    errors,
+  };
+}
+
 export function parseCSV(file: File): Promise<ParsedCSVData> {
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
