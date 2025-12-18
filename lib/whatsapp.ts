@@ -173,6 +173,16 @@ export interface SendResult {
   messageId?: string;
 }
 
+// 超時包裝函數
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(errorMsg)), timeoutMs)
+    ),
+  ]);
+}
+
 export async function sendMessage(phone: string, message: string): Promise<SendResult> {
   if (!state.client || state.status !== 'ready') {
     return {
@@ -194,18 +204,12 @@ export async function sendMessage(phone: string, message: string): Promise<SendR
     // 構建 WhatsApp ID
     const chatId = `${formattedPhone}@c.us`;
 
-    // 檢查號碼是否存在於 WhatsApp
-    const isRegistered = await state.client.isRegisteredUser(chatId);
-    if (!isRegistered) {
-      return {
-        phone,
-        success: false,
-        error: '此號碼未註冊 WhatsApp',
-      };
-    }
-
-    // 發送訊息
-    const result = await state.client.sendMessage(chatId, message);
+    // 直接嘗試發送訊息 (30秒超時)，跳過號碼檢查以提升速度
+    const result = await withTimeout(
+      state.client.sendMessage(chatId, message),
+      30000,
+      '發送訊息超時'
+    );
 
     return {
       phone,
@@ -214,10 +218,19 @@ export async function sendMessage(phone: string, message: string): Promise<SendR
     };
   } catch (error) {
     console.error(`Failed to send message to ${phone}:`, error);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    // 如果是號碼無效的錯誤，返回友好的錯誤訊息
+    if (errorMsg.includes('invalid') || errorMsg.includes('not registered')) {
+      return {
+        phone,
+        success: false,
+        error: '此號碼未註冊 WhatsApp',
+      };
+    }
     return {
       phone,
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMsg,
     };
   }
 }
