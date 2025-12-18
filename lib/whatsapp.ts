@@ -155,28 +155,14 @@ export async function initializeClient(): Promise<void> {
 export async function logout(): Promise<void> {
   const client = state.client;
 
-  // 先重置狀態，讓 API 可以快速返回
+  // 立即重置狀態，讓 API 可以快速返回
   state.client = null;
   state.qrCode = null;
   state.qrDataUrl = null;
   state.error = null;
   notifyStatusChange('disconnected');
 
-  if (client) {
-    // 背景執行登出和清理，設置 timeout 避免 hang
-    try {
-      await withTimeout(client.logout(), 10000, 'Logout timeout');
-    } catch (e) {
-      console.log('Error during logout:', e);
-    }
-    try {
-      await withTimeout(client.destroy(), 10000, 'Destroy timeout');
-    } catch (e) {
-      console.log('Error during destroy:', e);
-    }
-  }
-
-  // 刪除 session 數據確保完全登出
+  // 刪除 session 數據確保完全登出 (同步執行，很快)
   const authPath = path.join(process.cwd(), '.wwebjs_auth');
   try {
     if (fs.existsSync(authPath)) {
@@ -185,6 +171,22 @@ export async function logout(): Promise<void> {
     }
   } catch (e) {
     console.log('Error clearing auth data:', e);
+  }
+
+  // 背景執行 client 清理，不阻塞 API 返回
+  if (client) {
+    setImmediate(async () => {
+      try {
+        await withTimeout(client.logout(), 10000, 'Logout timeout');
+      } catch (e) {
+        console.log('Error during logout:', e);
+      }
+      try {
+        await withTimeout(client.destroy(), 10000, 'Destroy timeout');
+      } catch (e) {
+        console.log('Error during destroy:', e);
+      }
+    });
   }
 }
 
