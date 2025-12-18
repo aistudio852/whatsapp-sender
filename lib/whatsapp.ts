@@ -152,17 +152,25 @@ export async function initializeClient(): Promise<void> {
 
 export async function logout(): Promise<void> {
   if (state.client) {
-    try {
-      await state.client.logout();
-      await state.client.destroy();
-    } catch (e) {
-      console.log('Error during logout:', e);
-    }
+    const client = state.client;
+    // 先重置狀態，讓 API 可以快速返回
     state.client = null;
     state.qrCode = null;
     state.qrDataUrl = null;
     state.error = null;
     notifyStatusChange('disconnected');
+
+    // 背景執行登出和清理，設置 timeout 避免 hang
+    try {
+      await withTimeout(client.logout(), 10000, 'Logout timeout');
+    } catch (e) {
+      console.log('Error during logout:', e);
+    }
+    try {
+      await withTimeout(client.destroy(), 10000, 'Destroy timeout');
+    } catch (e) {
+      console.log('Error during destroy:', e);
+    }
   }
 }
 
