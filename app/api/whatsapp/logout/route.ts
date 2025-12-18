@@ -30,22 +30,13 @@ export async function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const corsHeaders = getCorsHeaders(request);
 
-  try {
-    await logout();
-
-    return NextResponse.json({
-      success: true,
-      message: '已登出 WhatsApp',
-    }, { headers: corsHeaders });
-  } catch (error) {
+  // 不等待 logout 完成，直接返回
+  logout().catch((error) => {
     console.error('Logout error:', error);
-    return NextResponse.json(
-      {
-        success: false,
-        message: '登出失敗',
-        error: error instanceof Error ? error.message : String(error),
-      },
-      { status: 500, headers: corsHeaders }
-    );
-  }
+  });
+
+  return NextResponse.json({
+    success: true,
+    message: '已登出 WhatsApp',
+  }, { headers: corsHeaders });
 }
