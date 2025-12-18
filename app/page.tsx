@@ -39,6 +39,14 @@ export default function Home() {
     }
   }, []);
 
+  const replaceVariables = (template: string, data: Record<string, string>): string => {
+    return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+      return data[key] !== undefined ? data[key] : match;
+    });
+  };
+
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
   const handleSend = async () => {
     if (!validRecipients.length || !messageTemplate) {
       alert('請確保有有效收件人和訊息內容');
@@ -54,30 +62,41 @@ export default function Home() {
     setShowProgress(true);
     setSendResults([]);
 
-    try {
-      const response = await fetch('/api/whatsapp/send', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          recipients: validRecipients,
-          messageTemplate,
-          delay,
-        }),
-      });
+    // 逐條發送，實時更新進度
+    for (let i = 0; i < validRecipients.length; i++) {
+      const recipient = validRecipients[i];
+      const personalizedMessage = replaceVariables(messageTemplate, recipient);
 
-      const data = await response.json();
+      try {
+        const response = await fetch('/api/whatsapp/send-one', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            phone: recipient.phone,
+            message: personalizedMessage,
+          }),
+        });
 
-      if (data.results) {
-        setSendResults(data.results);
+        const result = await response.json();
+        setSendResults(prev => [...prev, result]);
+      } catch (error) {
+        console.error('Send error:', error);
+        setSendResults(prev => [...prev, {
+          phone: recipient.phone,
+          success: false,
+          error: '發送失敗',
+        }]);
       }
-    } catch (error) {
-      console.error('Send error:', error);
-      alert('發送過程中發生錯誤');
-    } finally {
-      setIsSending(false);
+
+      // 延遲（除了最後一條）
+      if (i < validRecipients.length - 1) {
+        await sleep(delay);
+      }
     }
+
+    setIsSending(false);
   };
 
   const canSend = connectionStatus === 'ready' && validRecipients.length > 0 && messageTemplate.trim() !== '';
