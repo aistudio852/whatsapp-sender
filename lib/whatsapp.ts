@@ -317,3 +317,41 @@ export function getActiveSessionCount(): number {
 export function getActiveUserIds(): string[] {
   return Array.from(userSessions.keys());
 }
+
+// WhatsApp 用戶資訊
+export interface WhatsAppUserInfo {
+  phone: string | null;
+  name: string | null;
+  profilePicUrl: string | null;
+}
+
+// 獲取已登入的 WhatsApp 用戶資訊
+export async function getWhatsAppUserInfo(userId: string): Promise<WhatsAppUserInfo | null> {
+  const state = userSessions.get(userId);
+
+  if (!state?.client || state.status !== 'ready') {
+    return null;
+  }
+
+  try {
+    const info = state.client.info;
+    let profilePicUrl: string | null = null;
+
+    // 嘗試獲取頭像
+    try {
+      const myId = info.wid._serialized;
+      profilePicUrl = await state.client.getProfilePicUrl(myId);
+    } catch (e) {
+      console.log('Could not get profile picture:', e);
+    }
+
+    return {
+      phone: info.wid.user || null,
+      name: info.pushname || null,
+      profilePicUrl: profilePicUrl || null,
+    };
+  } catch (error) {
+    console.error(`Failed to get WhatsApp user info for ${userId}:`, error);
+    return null;
+  }
+}
