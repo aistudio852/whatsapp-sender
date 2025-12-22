@@ -36,8 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
-# Baileys auth
-.baileys_auth
+# whatsapp-web.js
+.wwebjs_auth
+.wwebjs_cache
 
 # typescript
 *.tsbuildinfo
