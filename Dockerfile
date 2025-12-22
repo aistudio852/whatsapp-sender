@@ -1,5 +1,9 @@
 FROM node:20-slim
 
+# 安裝 git (Baileys 依賴需要)
+RUN apt-get update && apt-get install -y git --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 複製 package files
