@@ -339,7 +339,8 @@ export async function getWhatsAppUserInfo(userId: string): Promise<WhatsAppUserI
 
     // 嘗試獲取頭像
     try {
-      profilePicUrl = await state.socket.profilePictureUrl(user.id, 'image');
+      const picUrl = await state.socket.profilePictureUrl(user.id, 'image');
+      profilePicUrl = picUrl || null;
     } catch (e) {
       console.log('Could not get profile picture:', e);
     }
