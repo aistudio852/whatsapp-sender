@@ -1,17 +1,25 @@
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  WASocket,
+  ConnectionState,
+} from '@whiskeysockets/baileys';
+import { Boom } from '@hapi/boom';
 import * as qrcode from 'qrcode';
 import * as fs from 'fs';
 import * as path from 'path';
+import pino from 'pino';
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'qr_ready' | 'authenticated' | 'ready';
 
 interface WhatsAppState {
-  client: Client | null;
+  socket: WASocket | null;
   status: ConnectionStatus;
   qrCode: string | null;
   qrDataUrl: string | null;
   error: string | null;
   lastActivity: number;
+  saveCreds: (() => Promise<void>) | null;
 }
 
 // 多租戶狀態管理 - 每個用戶有獨立的 WhatsApp 會話
@@ -19,6 +27,9 @@ const userSessions: Map<string, WhatsAppState> = new Map();
 
 // Session 過期時間 (24 小時)
 const SESSION_TIMEOUT = 24 * 60 * 60 * 1000;
+
+// 靜音 logger (減少日誌輸出)
+const logger = pino({ level: 'silent' });
 
 // 清理過期 sessions (每小時執行一次)
 setInterval(() => {
@@ -34,12 +45,13 @@ setInterval(() => {
 function getOrCreateState(userId: string): WhatsAppState {
   if (!userSessions.has(userId)) {
     userSessions.set(userId, {
-      client: null,
+      socket: null,
       status: 'disconnected',
       qrCode: null,
       qrDataUrl: null,
       error: null,
       lastActivity: Date.now(),
+      saveCreds: null,
     });
   }
   const state = userSessions.get(userId)!;
@@ -49,17 +61,17 @@ function getOrCreateState(userId: string): WhatsAppState {
 
 async function cleanupSession(userId: string): Promise<void> {
   const state = userSessions.get(userId);
-  if (state?.client) {
+  if (state?.socket) {
     try {
-      await state.client.destroy();
+      state.socket.end(undefined);
     } catch (e) {
-      console.log(`Error destroying client for user ${userId}:`, e);
+      console.log(`Error ending socket for user ${userId}:`, e);
     }
   }
   userSessions.delete(userId);
 
   // 清理用戶的 auth 數據
-  const authPath = path.join(process.cwd(), '.wwebjs_auth', `session-${userId}`);
+  const authPath = path.join(process.cwd(), '.baileys_auth', userId);
   try {
     if (fs.existsSync(authPath)) {
       fs.rmSync(authPath, { recursive: true, force: true });
@@ -86,12 +98,12 @@ export async function initializeClient(userId: string): Promise<void> {
 
   const state = getOrCreateState(userId);
 
-  // 如果已經有客戶端正在運行，先關閉
-  if (state.client) {
+  // 如果已經有 socket 正在運行，先關閉
+  if (state.socket) {
     try {
-      await state.client.destroy();
+      state.socket.end(undefined);
     } catch (e) {
-      console.log(`Error destroying existing client for user ${userId}:`, e);
+      console.log(`Error ending existing socket for user ${userId}:`, e);
     }
   }
 
@@ -100,113 +112,110 @@ export async function initializeClient(userId: string): Promise<void> {
   state.error = null;
   state.status = 'connecting';
 
-  // 獲取 Chromium 路徑
-  const getChromiumPath = () => {
-    // Docker/Railway 環境
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-      return process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-    // 本地 macOS
-    if (process.platform === 'darwin') {
-      return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-    }
-    // 其他情況讓 puppeteer 自動偵測
-    return undefined;
-  };
-
   // 每個用戶有獨立的 session 目錄
-  const client = new Client({
-    authStrategy: new LocalAuth({
-      dataPath: './.wwebjs_auth',
-      clientId: userId, // 使用 userId 作為 clientId，實現用戶隔離
-    }),
-    puppeteer: {
-      headless: true,
-      executablePath: getChromiumPath(),
-      timeout: 120000,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-sync',
-        '--disable-translate',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-default-browser-check',
-      ],
-    },
-    qrMaxRetries: 5,
-  });
+  const authPath = path.join(process.cwd(), '.baileys_auth', userId);
 
-  client.on('qr', async (qr) => {
-    console.log(`QR code received for user: ${userId}`);
-    state.qrCode = qr;
-    try {
-      state.qrDataUrl = await qrcode.toDataURL(qr, { width: 256 });
-    } catch (e) {
-      console.error('Error generating QR data URL:', e);
-    }
-    state.status = 'qr_ready';
-  });
-
-  client.on('authenticated', () => {
-    console.log(`WhatsApp authenticated for user: ${userId}`);
-    state.qrCode = null;
-    state.qrDataUrl = null;
-    state.status = 'authenticated';
-  });
-
-  client.on('ready', () => {
-    console.log(`WhatsApp client ready for user: ${userId}`);
-    state.status = 'ready';
-  });
-
-  client.on('auth_failure', (msg) => {
-    console.error(`Authentication failed for user ${userId}:`, msg);
-    state.error = `驗證失敗: ${msg}`;
-    state.status = 'disconnected';
-  });
-
-  client.on('disconnected', (reason) => {
-    console.log(`WhatsApp disconnected for user ${userId}:`, reason);
-    state.error = `已斷開連接: ${reason}`;
-    state.status = 'disconnected';
-  });
-
-  state.client = client;
-
-  try {
-    await client.initialize();
-  } catch (error) {
-    console.error(`Failed to initialize WhatsApp client for user ${userId}:`, error);
-    state.error = `初始化失敗: ${error instanceof Error ? error.message : String(error)}`;
-    state.status = 'disconnected';
-    throw error;
+  // 確保目錄存在
+  if (!fs.existsSync(authPath)) {
+    fs.mkdirSync(authPath, { recursive: true });
   }
+
+  const { state: authState, saveCreds } = await useMultiFileAuthState(authPath);
+  state.saveCreds = saveCreds;
+
+  const socket = makeWASocket({
+    auth: authState,
+    printQRInTerminal: false,
+    logger,
+    browser: ['DataPro', 'Chrome', '120.0.0'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 30000,
+    retryRequestDelayMs: 500,
+    maxMsgRetryCount: 3,
+  });
+
+  state.socket = socket;
+
+  // 處理連接狀態更新
+  socket.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log(`QR code received for user: ${userId}`);
+      state.qrCode = qr;
+      try {
+        state.qrDataUrl = await qrcode.toDataURL(qr, { width: 256 });
+      } catch (e) {
+        console.error('Error generating QR data URL:', e);
+      }
+      state.status = 'qr_ready';
+    }
+
+    if (connection === 'close') {
+      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+      console.log(`Connection closed for user ${userId}, statusCode: ${statusCode}, shouldReconnect: ${shouldReconnect}`);
+
+      if (statusCode === DisconnectReason.loggedOut) {
+        state.error = '已登出';
+        state.status = 'disconnected';
+        state.socket = null;
+        // 清理 auth 數據
+        try {
+          if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true, force: true });
+          }
+        } catch (e) {
+          console.log(`Error clearing auth data for user ${userId}:`, e);
+        }
+      } else if (shouldReconnect) {
+        // 嘗試重新連接
+        console.log(`Reconnecting for user ${userId}...`);
+        state.status = 'connecting';
+        setTimeout(() => {
+          initializeClient(userId).catch(e => {
+            console.error(`Failed to reconnect for user ${userId}:`, e);
+          });
+        }, 3000);
+      } else {
+        state.error = `連接已關閉: ${statusCode}`;
+        state.status = 'disconnected';
+      }
+    } else if (connection === 'open') {
+      console.log(`WhatsApp connected for user: ${userId}`);
+      state.qrCode = null;
+      state.qrDataUrl = null;
+      state.status = 'ready';
+      state.error = null;
+    }
+  });
+
+  // 處理憑證更新
+  socket.ev.on('creds.update', async () => {
+    if (state.saveCreds) {
+      await state.saveCreds();
+    }
+  });
 }
 
 export async function logout(userId: string): Promise<void> {
   const state = userSessions.get(userId);
-  const client = state?.client;
+  const socket = state?.socket;
 
   if (state) {
     // 立即重置狀態
-    state.client = null;
+    state.socket = null;
     state.qrCode = null;
     state.qrDataUrl = null;
     state.error = null;
     state.status = 'disconnected';
+    state.saveCreds = null;
   }
 
   // 刪除用戶的 session 數據
-  const authPath = path.join(process.cwd(), '.wwebjs_auth', `session-${userId}`);
+  const authPath = path.join(process.cwd(), '.baileys_auth', userId);
   try {
     if (fs.existsSync(authPath)) {
       fs.rmSync(authPath, { recursive: true, force: true });
@@ -216,18 +225,18 @@ export async function logout(userId: string): Promise<void> {
     console.log(`Error clearing auth data for user ${userId}:`, e);
   }
 
-  // 背景執行 client 清理
-  if (client) {
+  // 背景執行 socket 清理
+  if (socket) {
     setImmediate(async () => {
       try {
-        await withTimeout(client.logout(), 10000, 'Logout timeout');
+        await socket.logout();
       } catch (e) {
         console.log(`Error during logout for user ${userId}:`, e);
       }
       try {
-        await withTimeout(client.destroy(), 10000, 'Destroy timeout');
+        socket.end(undefined);
       } catch (e) {
-        console.log(`Error during destroy for user ${userId}:`, e);
+        console.log(`Error during end for user ${userId}:`, e);
       }
     });
   }
@@ -240,20 +249,10 @@ export interface SendResult {
   messageId?: string;
 }
 
-// 超時包裝函數
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(errorMsg)), timeoutMs)
-    ),
-  ]);
-}
-
 export async function sendMessage(userId: string, phone: string, message: string): Promise<SendResult> {
   const state = userSessions.get(userId);
 
-  if (!state?.client || state.status !== 'ready') {
+  if (!state?.socket || state.status !== 'ready') {
     return {
       phone,
       success: false,
@@ -272,18 +271,15 @@ export async function sendMessage(userId: string, phone: string, message: string
       formattedPhone = formattedPhone.substring(1);
     }
 
-    const chatId = `${formattedPhone}@c.us`;
+    // Baileys 使用 @s.whatsapp.net 格式
+    const jid = `${formattedPhone}@s.whatsapp.net`;
 
-    const result = await withTimeout(
-      state.client.sendMessage(chatId, message),
-      30000,
-      '發送訊息超時'
-    );
+    const result = await state.socket.sendMessage(jid, { text: message });
 
     return {
       phone,
       success: true,
-      messageId: result.id._serialized,
+      messageId: result?.key?.id || undefined,
     };
   } catch (error) {
     console.error(`Failed to send message to ${phone} for user ${userId}:`, error);
@@ -329,25 +325,28 @@ export interface WhatsAppUserInfo {
 export async function getWhatsAppUserInfo(userId: string): Promise<WhatsAppUserInfo | null> {
   const state = userSessions.get(userId);
 
-  if (!state?.client || state.status !== 'ready') {
+  if (!state?.socket || state.status !== 'ready') {
     return null;
   }
 
   try {
-    const info = state.client.info;
+    const user = state.socket.user;
+    if (!user) {
+      return null;
+    }
+
     let profilePicUrl: string | null = null;
 
     // 嘗試獲取頭像
     try {
-      const myId = info.wid._serialized;
-      profilePicUrl = await state.client.getProfilePicUrl(myId);
+      profilePicUrl = await state.socket.profilePictureUrl(user.id, 'image');
     } catch (e) {
       console.log('Could not get profile picture:', e);
     }
 
     return {
-      phone: info.wid.user || null,
-      name: info.pushname || null,
+      phone: user.id?.split('@')[0] || null,
+      name: user.name || null,
       profilePicUrl: profilePicUrl || null,
     };
   } catch (error) {

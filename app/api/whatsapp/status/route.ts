@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getStatus, getActiveSessionCount } from '@/lib/whatsapp';
 
-const VERSION = '3.0.0'; // 多租戶版本
+const VERSION = '4.0.0'; // Baileys 版本 - 低內存
 
 const allowedOrigins = [
   'https://datapro.city',
