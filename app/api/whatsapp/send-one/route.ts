@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sendMessage, isClientReady } from '@/lib/whatsapp';
 
 interface SendOneRequest {
+  userId: string;
   phone: string;
   message: string;
 }
@@ -11,6 +12,8 @@ const allowedOrigins = [
   'https://www.datapro.city',
   'https://datapro-bf4b7.web.app',
   'https://datapro-bf4b7.firebaseapp.com',
+  'http://localhost:3000',
+  'http://localhost:5000',
 ];
 
 function getCorsHeaders(request: NextRequest) {
@@ -33,18 +36,29 @@ export async function POST(request: NextRequest) {
   const corsHeaders = getCorsHeaders(request);
 
   try {
-    if (!isClientReady()) {
+    const body: SendOneRequest = await request.json();
+    const { userId, phone, message } = body;
+
+    // 驗證 userId
+    if (!userId || typeof userId !== 'string') {
       return NextResponse.json(
         {
           success: false,
-          error: 'WhatsApp 未連接',
+          error: '需要提供有效的用戶 ID',
         },
         { status: 400, headers: corsHeaders }
       );
     }
 
-    const body: SendOneRequest = await request.json();
-    const { phone, message } = body;
+    if (!isClientReady(userId)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'WhatsApp 未連接，請先掃描 QR Code 登入你的 WhatsApp',
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
 
     if (!phone || !message) {
       return NextResponse.json(
@@ -56,7 +70,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await sendMessage(phone, message);
+    const result = await sendMessage(userId, phone, message);
 
     return NextResponse.json(result, { headers: corsHeaders });
   } catch (error) {

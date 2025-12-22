@@ -11,56 +11,94 @@ interface WhatsAppState {
   qrCode: string | null;
   qrDataUrl: string | null;
   error: string | null;
+  lastActivity: number;
 }
 
-// 全局狀態 (單例模式)
-const state: WhatsAppState = {
-  client: null,
-  status: 'disconnected',
-  qrCode: null,
-  qrDataUrl: null,
-  error: null,
-};
+// 多租戶狀態管理 - 每個用戶有獨立的 WhatsApp 會話
+const userSessions: Map<string, WhatsAppState> = new Map();
 
-// 事件監聽器
-type StatusListener = (status: ConnectionStatus) => void;
-const statusListeners: StatusListener[] = [];
+// Session 過期時間 (24 小時)
+const SESSION_TIMEOUT = 24 * 60 * 60 * 1000;
 
-function notifyStatusChange(status: ConnectionStatus) {
-  state.status = status;
-  statusListeners.forEach(listener => listener(status));
+// 清理過期 sessions (每小時執行一次)
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, state] of userSessions.entries()) {
+    if (now - state.lastActivity > SESSION_TIMEOUT) {
+      console.log(`Cleaning up expired session for user: ${userId}`);
+      cleanupSession(userId);
+    }
+  }
+}, 60 * 60 * 1000);
+
+function getOrCreateState(userId: string): WhatsAppState {
+  if (!userSessions.has(userId)) {
+    userSessions.set(userId, {
+      client: null,
+      status: 'disconnected',
+      qrCode: null,
+      qrDataUrl: null,
+      error: null,
+      lastActivity: Date.now(),
+    });
+  }
+  const state = userSessions.get(userId)!;
+  state.lastActivity = Date.now();
+  return state;
 }
 
-export function addStatusListener(listener: StatusListener) {
-  statusListeners.push(listener);
-  return () => {
-    const index = statusListeners.indexOf(listener);
-    if (index > -1) statusListeners.splice(index, 1);
-  };
+async function cleanupSession(userId: string): Promise<void> {
+  const state = userSessions.get(userId);
+  if (state?.client) {
+    try {
+      await state.client.destroy();
+    } catch (e) {
+      console.log(`Error destroying client for user ${userId}:`, e);
+    }
+  }
+  userSessions.delete(userId);
+
+  // 清理用戶的 auth 數據
+  const authPath = path.join(process.cwd(), '.wwebjs_auth', `session-${userId}`);
+  try {
+    if (fs.existsSync(authPath)) {
+      fs.rmSync(authPath, { recursive: true, force: true });
+    }
+  } catch (e) {
+    console.log(`Error clearing auth data for user ${userId}:`, e);
+  }
 }
 
-export function getStatus(): { status: ConnectionStatus; error: string | null } {
+export function getStatus(userId: string): { status: ConnectionStatus; error: string | null } {
+  const state = getOrCreateState(userId);
   return { status: state.status, error: state.error };
 }
 
-export function getQRCode(): { qrCode: string | null; qrDataUrl: string | null } {
+export function getQRCode(userId: string): { qrCode: string | null; qrDataUrl: string | null } {
+  const state = getOrCreateState(userId);
   return { qrCode: state.qrCode, qrDataUrl: state.qrDataUrl };
 }
 
-export async function initializeClient(): Promise<void> {
+export async function initializeClient(userId: string): Promise<void> {
+  if (!userId) {
+    throw new Error('userId is required');
+  }
+
+  const state = getOrCreateState(userId);
+
   // 如果已經有客戶端正在運行，先關閉
   if (state.client) {
     try {
       await state.client.destroy();
     } catch (e) {
-      console.log('Error destroying existing client:', e);
+      console.log(`Error destroying existing client for user ${userId}:`, e);
     }
   }
 
   state.qrCode = null;
   state.qrDataUrl = null;
   state.error = null;
-  notifyStatusChange('connecting');
+  state.status = 'connecting';
 
   // 獲取 Chromium 路徑
   const getChromiumPath = () => {
@@ -76,9 +114,11 @@ export async function initializeClient(): Promise<void> {
     return undefined;
   };
 
+  // 每個用戶有獨立的 session 目錄
   const client = new Client({
     authStrategy: new LocalAuth({
       dataPath: './.wwebjs_auth',
+      clientId: userId, // 使用 userId 作為 clientId，實現用戶隔離
     }),
     puppeteer: {
       headless: true,
@@ -106,38 +146,38 @@ export async function initializeClient(): Promise<void> {
   });
 
   client.on('qr', async (qr) => {
-    console.log('QR code received');
+    console.log(`QR code received for user: ${userId}`);
     state.qrCode = qr;
     try {
       state.qrDataUrl = await qrcode.toDataURL(qr, { width: 256 });
     } catch (e) {
       console.error('Error generating QR data URL:', e);
     }
-    notifyStatusChange('qr_ready');
+    state.status = 'qr_ready';
   });
 
   client.on('authenticated', () => {
-    console.log('WhatsApp authenticated');
+    console.log(`WhatsApp authenticated for user: ${userId}`);
     state.qrCode = null;
     state.qrDataUrl = null;
-    notifyStatusChange('authenticated');
+    state.status = 'authenticated';
   });
 
   client.on('ready', () => {
-    console.log('WhatsApp client ready');
-    notifyStatusChange('ready');
+    console.log(`WhatsApp client ready for user: ${userId}`);
+    state.status = 'ready';
   });
 
   client.on('auth_failure', (msg) => {
-    console.error('Authentication failed:', msg);
+    console.error(`Authentication failed for user ${userId}:`, msg);
     state.error = `驗證失敗: ${msg}`;
-    notifyStatusChange('disconnected');
+    state.status = 'disconnected';
   });
 
   client.on('disconnected', (reason) => {
-    console.log('WhatsApp disconnected:', reason);
+    console.log(`WhatsApp disconnected for user ${userId}:`, reason);
     state.error = `已斷開連接: ${reason}`;
-    notifyStatusChange('disconnected');
+    state.status = 'disconnected';
   });
 
   state.client = client;
@@ -145,46 +185,49 @@ export async function initializeClient(): Promise<void> {
   try {
     await client.initialize();
   } catch (error) {
-    console.error('Failed to initialize WhatsApp client:', error);
+    console.error(`Failed to initialize WhatsApp client for user ${userId}:`, error);
     state.error = `初始化失敗: ${error instanceof Error ? error.message : String(error)}`;
-    notifyStatusChange('disconnected');
+    state.status = 'disconnected';
     throw error;
   }
 }
 
-export async function logout(): Promise<void> {
-  const client = state.client;
+export async function logout(userId: string): Promise<void> {
+  const state = userSessions.get(userId);
+  const client = state?.client;
 
-  // 立即重置狀態，讓 API 可以快速返回
-  state.client = null;
-  state.qrCode = null;
-  state.qrDataUrl = null;
-  state.error = null;
-  notifyStatusChange('disconnected');
+  if (state) {
+    // 立即重置狀態
+    state.client = null;
+    state.qrCode = null;
+    state.qrDataUrl = null;
+    state.error = null;
+    state.status = 'disconnected';
+  }
 
-  // 刪除 session 數據確保完全登出 (同步執行，很快)
-  const authPath = path.join(process.cwd(), '.wwebjs_auth');
+  // 刪除用戶的 session 數據
+  const authPath = path.join(process.cwd(), '.wwebjs_auth', `session-${userId}`);
   try {
     if (fs.existsSync(authPath)) {
       fs.rmSync(authPath, { recursive: true, force: true });
-      console.log('Auth data cleared');
+      console.log(`Auth data cleared for user: ${userId}`);
     }
   } catch (e) {
-    console.log('Error clearing auth data:', e);
+    console.log(`Error clearing auth data for user ${userId}:`, e);
   }
 
-  // 背景執行 client 清理，不阻塞 API 返回
+  // 背景執行 client 清理
   if (client) {
     setImmediate(async () => {
       try {
         await withTimeout(client.logout(), 10000, 'Logout timeout');
       } catch (e) {
-        console.log('Error during logout:', e);
+        console.log(`Error during logout for user ${userId}:`, e);
       }
       try {
         await withTimeout(client.destroy(), 10000, 'Destroy timeout');
       } catch (e) {
-        console.log('Error during destroy:', e);
+        console.log(`Error during destroy for user ${userId}:`, e);
       }
     });
   }
@@ -207,28 +250,30 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMsg: string
   ]);
 }
 
-export async function sendMessage(phone: string, message: string): Promise<SendResult> {
-  if (!state.client || state.status !== 'ready') {
+export async function sendMessage(userId: string, phone: string, message: string): Promise<SendResult> {
+  const state = userSessions.get(userId);
+
+  if (!state?.client || state.status !== 'ready') {
     return {
       phone,
       success: false,
-      error: 'WhatsApp 未連接',
+      error: 'WhatsApp 未連接，請先掃描 QR Code 登入你的 WhatsApp',
     };
   }
 
+  // 更新活動時間
+  state.lastActivity = Date.now();
+
   try {
-    // 格式化電話號碼 (移除空格、橫線等，確保有國際區號)
+    // 格式化電話號碼
     let formattedPhone = phone.replace(/[\s\-\(\)]/g, '');
 
-    // 如果以 + 開頭，移除 +
     if (formattedPhone.startsWith('+')) {
       formattedPhone = formattedPhone.substring(1);
     }
 
-    // 構建 WhatsApp ID
     const chatId = `${formattedPhone}@c.us`;
 
-    // 直接嘗試發送訊息 (30秒超時)，跳過號碼檢查以提升速度
     const result = await withTimeout(
       state.client.sendMessage(chatId, message),
       30000,
@@ -241,9 +286,8 @@ export async function sendMessage(phone: string, message: string): Promise<SendR
       messageId: result.id._serialized,
     };
   } catch (error) {
-    console.error(`Failed to send message to ${phone}:`, error);
+    console.error(`Failed to send message to ${phone} for user ${userId}:`, error);
     const errorMsg = error instanceof Error ? error.message : String(error);
-    // 如果是號碼無效的錯誤，返回友好的錯誤訊息
     if (errorMsg.includes('invalid') || errorMsg.includes('not registered')) {
       return {
         phone,
@@ -259,6 +303,17 @@ export async function sendMessage(phone: string, message: string): Promise<SendR
   }
 }
 
-export function isClientReady(): boolean {
-  return state.status === 'ready';
+export function isClientReady(userId: string): boolean {
+  const state = userSessions.get(userId);
+  return state?.status === 'ready';
+}
+
+// 獲取當前活躍的 session 數量（用於監控）
+export function getActiveSessionCount(): number {
+  return userSessions.size;
+}
+
+// 獲取所有活躍用戶 ID（用於管理）
+export function getActiveUserIds(): string[] {
+  return Array.from(userSessions.keys());
 }

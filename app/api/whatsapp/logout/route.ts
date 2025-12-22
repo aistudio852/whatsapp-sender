@@ -1,5 +1,4 @@
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { logout } from '@/lib/whatsapp';
 
 const allowedOrigins = [
@@ -30,13 +29,40 @@ export async function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const corsHeaders = getCorsHeaders(request);
 
-  // 不等待 logout 完成，直接返回
-  logout().catch((error) => {
-    console.error('Logout error:', error);
-  });
+  try {
+    const body = await request.json();
+    const { userId } = body;
 
-  return NextResponse.json({
-    success: true,
-    message: '已登出 WhatsApp',
-  }, { headers: corsHeaders });
+    // 驗證 userId
+    if (!userId || typeof userId !== 'string') {
+      return NextResponse.json(
+        {
+          success: false,
+          message: '需要提供有效的用戶 ID',
+          error: 'userId is required',
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // 不等待 logout 完成，直接返回
+    logout(userId).catch((error) => {
+      console.error(`Logout error for user ${userId}:`, error);
+    });
+
+    return NextResponse.json({
+      success: true,
+      message: '已登出 WhatsApp',
+    }, { headers: corsHeaders });
+  } catch (error) {
+    console.error('Logout error:', error);
+    return NextResponse.json(
+      {
+        success: false,
+        message: '登出失敗',
+        error: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500, headers: corsHeaders }
+    );
+  }
 }
