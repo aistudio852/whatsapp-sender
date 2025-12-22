@@ -1,8 +1,10 @@
 FROM node:20-slim
 
-# 安裝 git (Baileys 依賴需要)
-RUN apt-get update && apt-get install -y git --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# 安裝 git 和 openssh-client (Baileys 依賴需要)
+RUN apt-get update && apt-get install -y git openssh-client --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --global url."https://github.com/".insteadOf ssh://git@github.com/ \
+    && git config --global url."https://github.com/".insteadOf git@github.com:
 
 WORKDIR /app
 
